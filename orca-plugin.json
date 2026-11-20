@@ -1,0 +1,41 @@
+{
+  "manifestVersion": 2,
+  "id": "parquet-viewer",
+  "name": "Parquet Viewer",
+  "version": "1.0.0",
+  "execution": "sandboxed-ui",
+  "description": "Browse Apache Parquet files in Orca's editor: a virtualized grid over millions of rows, with the file's schema, row groups and key-value metadata. Read-only.",
+  "license": "MIT",
+  "engines": {
+    "orca": ">=1.4.248"
+  },
+  "contributes": {
+    "customEditors": [
+      {
+        "id": "parquet",
+        "title": "Parquet",
+        "extensions": [".parquet", ".parq", ".pqt"],
+        "entry": "editor/index.html",
+        "priority": "default",
+        "contentKind": "bytes"
+      }
+    ]
+  },
+  "capabilities": [],
+  "cover": {
+    "path": "images/cover.png",
+    "alt": "An events parquet file in Orca: timestamps, user ids, countries and revenue values in a dark grid, with row and column counts in the status bar"
+  },
+  "screenshots": [
+    {
+      "path": "images/screenshot-large.png",
+      "alt": "A 200,000-row file open: the grid shows its first rows while the status bar counts every row",
+      "caption": "Millions of rows scroll smoothly"
+    },
+    {
+      "path": "images/screenshot-types.png",
+      "alt": "A file with the classic impala types: int32, int64, float, double, text and int96 timestamps side by side",
+      "caption": "Every physical and logical type"
+    }
+  ]
+}

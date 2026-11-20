@@ -1,0 +1,19 @@
+{
+  "name": "parquet-viewer-build",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "bun build.mjs",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "fzstd": "0.1.1",
+    "hyparquet": "1.33.1",
+    "snappyjs": "0.7.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "happy-dom": "21.0.4",
+    "hyparquet-writer": "0.18.0"
+  }
+}
