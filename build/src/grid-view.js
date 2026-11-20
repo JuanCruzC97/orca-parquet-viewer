@@ -159,8 +159,9 @@ export function createGridView(host, options) {
     if (nextWidth === width && nextHeight === height) return false
     width = nextWidth
     height = nextHeight
-    viewport.style.width = `${width}px`
-    viewport.style.height = `${height}px`
+    // Why: the viewport is 100% of the scroller's content box in CSS. Sizing it to the previous
+    // client size here would briefly overflow it when a scrollbar appears, which can make the
+    // scrollbars and the empty-state layout oscillate.
     return true
   }
 
@@ -329,8 +330,9 @@ export function createGridView(host, options) {
   }
 
   function syncEmptyMessage() {
-    emptyBox.textContent = emptyText
-    emptyBox.hidden = !emptyText || rowCount > 0
+    if (emptyBox.textContent !== emptyText) emptyBox.textContent = emptyText
+    const hidden = !emptyText || rowCount > 0
+    if (emptyBox.hidden !== hidden) emptyBox.hidden = hidden
   }
 
   function columnAlign(column) {
