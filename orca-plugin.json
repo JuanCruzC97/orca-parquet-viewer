@@ -14,7 +14,7 @@
       {
         "id": "parquet",
         "title": "Parquet",
-        "extensions": [".parquet", ".parq", ".pqt"],
+        "extensions": [".parquet", ".parq", ".pq", ".pqt"],
         "entry": "editor/index.html",
         "priority": "default",
         "contentKind": "bytes"

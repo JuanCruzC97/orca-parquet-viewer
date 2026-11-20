@@ -8,8 +8,8 @@ It only reads: nothing in the file changes. Requires Orca 1.4.248 or later.
 
 ## Use it
 
-After installing it from **Settings → Plugins**, open any `.parquet`, `.parq` or `.pqt` file from
-the file explorer. To see the raw bytes instead, switch the tab to **Source**.
+After installing it from **Settings → Plugins**, open any `.parquet`, `.parq`, `.pq` or `.pqt`
+file from the file explorer. To see the raw bytes instead, switch the tab to **Source**.
 
 - **Data:** every visible row and column is drawn on demand, so files with millions of rows and
   thousands of columns scroll smoothly. Column headers show each column's name and type
