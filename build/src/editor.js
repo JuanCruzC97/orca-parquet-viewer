@@ -12,8 +12,6 @@ const GRID_FONT = '12px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI"
 // Beyond this many columns a window reads only the columns on screen: a 2,000-column file
 // scrolls vertically without ever decoding the columns it does not show.
 const WIDE_COLUMN_THRESHOLD = 40
-const MIN_COLUMN_WIDTH = 72
-const MAX_COLUMN_WIDTH = 360
 const BASE_WINDOW_ROWS = 2_000
 const MAX_WINDOW_ROWS = 30_000
 const MAX_CACHED_WINDOWS = 8
@@ -43,6 +41,7 @@ let file = null
 let loadToken = 0
 let view = 'data'
 let metadataRendered = false
+let initialFitDone = false
 let windowRows = BASE_WINDOW_ROWS
 /** Window index → entry: `{ rowStart, rowEnd, colRange, promise, rows, failedColumns, error }`. */
 const windows = new Map()
@@ -108,6 +107,12 @@ function ensureWindow(w, colRange) {
       next.rows = result.rows
       next.failedColumns = result.failedColumns
       grid.refresh()
+      // Why: the opening width only knows the header; once the first rows are here, fit the
+      // columns on screen to the values they actually hold.
+      if (!initialFitDone && w === 0) {
+        initialFitDone = true
+        grid.fitVisibleColumns()
+      }
       updateNote()
     },
     (error) => {
@@ -197,12 +202,6 @@ function announce(text) {
   requestAnimationFrame(() => (ui.live.textContent = text))
 }
 
-function columnWidth(column) {
-  const name = measureText(column.name)
-  const label = measureText(column.label) * 0.85
-  return Math.max(MIN_COLUMN_WIDTH, Math.min(MAX_COLUMN_WIDTH, Math.ceil(Math.max(name, label)) + 30))
-}
-
 function renderNotice() {
   const missing = file.unsupportedCodecs
   ui.notice.hidden = missing.length === 0
@@ -224,6 +223,7 @@ function receive(bytes) {
   file = null
   windows.clear()
   metadataRendered = false
+  initialFitDone = false
   showMessage(MESSAGES.opening)
   // Why: let "Opening" paint before the footer parse, which holds the main thread briefly.
   setTimeout(async () => {
@@ -238,7 +238,6 @@ function receive(bytes) {
     // Window size follows the file: big row groups amortize their re-reads with big windows.
     const maxGroupRows = file.rowGroups.reduce((max, group) => Math.max(max, group.rowCount), 0)
     windowRows = Math.min(MAX_WINDOW_ROWS, Math.max(BASE_WINDOW_ROWS, Math.ceil(maxGroupRows / 4)))
-    file.columns.forEach((column) => (column.width = columnWidth(column)))
     ui.message.hidden = true
     ui.workbook.hidden = false
     renderNotice()

@@ -9,12 +9,16 @@
 
 import { createAxis } from './axis.js'
 import { escapeHtml, renderedText } from './cell-display.js'
+import { clampColumnWidth, fittedColumnWidth, headerColumnWidth } from './column-width.js'
 
-const HEADER_HEIGHT = 24
+const HEADER_HEIGHT = 40
 const ROW_HEIGHT = 24
 const OVERSCAN_ROWS = 10
 const OVERSCAN_COLUMNS = 3
+const AUTO_FIT_SAMPLE_ROWS = 2_000
 const MAX_RENDERED_TEXT = 1000
+// Header text follows the values underneath: numbers and dates to the right, booleans centered.
+const RIGHT_ALIGNED_LABEL = /^(?:u?int\d*|float\d*|double|decimal\(|date$|time\[|timestamp\[)/
 
 /**
  * @param {HTMLElement} host
@@ -43,9 +47,13 @@ export function createGridView(host, options) {
   const rowList = host.querySelector('.row-list')
   const activeBox = host.querySelector('.selection .active')
   const idPrefix = `g${Math.random().toString(36).slice(2, 8)}`
+  host.style.setProperty('--grid-header-height', `${HEADER_HEIGHT}px`)
 
   let columns = []
+  let columnWidths = []
+  let userSized = new Set()
   let columnAxis = createAxis(new Float64Array(0))
+  let resizing = null
   let rowCount = 0
   let gutter = 52
   let active = { r: 0, c: 0 }
@@ -58,20 +66,28 @@ export function createGridView(host, options) {
   function setModel(next) {
     columns = next.columns
     rowCount = next.rowCount
-    columnAxis = createAxis(Float64Array.from(next.columns.map((column) => column.width)))
+    clearResize()
+    columnWidths = columns.map((column) => headerColumnWidth(options.measureText, column))
+    userSized = new Set()
     gutter = Math.max(52, Math.ceil(options.measureText(String(Math.max(1, rowCount))) + 20))
     active = { r: 0, c: 0 }
     rendered = null
     viewport.setAttribute('aria-rowcount', String(rowCount + 1))
     viewport.setAttribute('aria-colcount', String(columns.length + 1))
     viewport.style.setProperty('--gutter', `${gutter}px`)
-    spacer.style.width = `${gutter + columnAxis.total}px`
+    layoutColumns()
     spacer.style.height = `${HEADER_HEIGHT + rowCount * ROW_HEIGHT}px`
     measure()
     scroller.scrollTop = 0
     scroller.scrollLeft = 0
     onScroll()
     render()
+  }
+
+  /** Rebuilds the column axis and the scroll extent after a width changes. */
+  function layoutColumns() {
+    columnAxis = createAxis(Float64Array.from(columnWidths))
+    spacer.style.width = `${gutter + columnAxis.total}px`
   }
 
   function measure() {
@@ -140,23 +156,33 @@ export function createGridView(host, options) {
     let header = ''
     for (let c = area.c0; c <= area.c1; c++) {
       const column = columns[c]
+      const alt = c % 2 === 1 ? ' alt' : ''
+      const current = c === active.c ? ' active' : ''
+      const dragging = resizing?.c === c ? ' resizing' : ''
+      const align = columnAlign(column)
       header +=
-        `<div class="col-head" role="columnheader" aria-colindex="${c + 2}" style="left:${columnAxis.start(c)}px;width:${columnAxis.size(c)}px"` +
+        `<div class="col-head${alt}${current}${dragging}${align}" role="columnheader" aria-colindex="${c + 2}"` +
+        ` style="left:${columnAxis.start(c)}px;width:${columnAxis.size(c)}px"` +
         ` title="${escapeHtml(column.name)} · ${escapeHtml(column.label)}">` +
+        `<div class="col-head-text">` +
         `<span class="col-name">${escapeHtml(column.name)}</span>` +
-        `<span class="col-type">${escapeHtml(column.label)}</span></div>`
+        `<span class="col-type">${escapeHtml(column.label)}</span></div>` +
+        `<span class="col-resize" role="separator" aria-orientation="vertical"` +
+        ` aria-label="Resize ${escapeHtml(column.name)} column" title="Drag to resize · double-click to fit"` +
+        ` data-column="${c}"></span></div>`
     }
     headerStrip.innerHTML = header
 
     let html = ''
     for (let r = area.r0; r <= area.r1; r++) {
+      const current = r === active.r ? ' active' : ''
       let cells = ''
       for (let c = area.c0; c <= area.c1; c++) {
         cells += cellHtml(r, c)
       }
       html +=
         `<div class="row" role="row" aria-rowindex="${r + 2}" style="top:${r * ROW_HEIGHT}px;height:${ROW_HEIGHT}px">` +
-        `<div class="row-head" role="rowheader" aria-colindex="1">${r + 1}</div>` +
+        `<div class="row-head${current}" role="rowheader" aria-colindex="1">${r + 1}</div>` +
         `<div class="strip">${cells}</div></div>`
     }
     rowList.innerHTML = html
@@ -173,17 +199,26 @@ export function createGridView(host, options) {
     options.onVisibleChange(visibleArea.r0, visibleArea.r1, visibleArea.c0, visibleArea.c1)
   }
 
+  function columnAlign(column) {
+    if (column.label === 'boolean') return ' align-center'
+    if (column.kind === 'date' || column.kind === 'timestamp' || RIGHT_ALIGNED_LABEL.test(column.label)) {
+      return ' align-right'
+    }
+    return ''
+  }
+
   function cellHtml(r, c) {
     const cell = options.getCell(r, c)
     const widthPx = columnAxis.size(c)
+    const alt = c % 2 === 1 ? ' alt' : ''
     if (!cell) {
-      return `<div class="cell pending" role="gridcell" id="${cellId(r, c)}" aria-colindex="${c + 2}"` +
+      return `<div class="cell pending${alt}" role="gridcell" id="${cellId(r, c)}" aria-colindex="${c + 2}"` +
         ` style="left:${columnAxis.start(c)}px;width:${widthPx}px"></div>`
     }
     const text = renderedText(cell.text)
     const title = cell.title ? ` title="${escapeHtml(cell.title)}"` : ''
     return (
-      `<div class="cell ${cell.kind}" role="gridcell" id="${cellId(r, c)}" aria-colindex="${c + 2}"${title}` +
+      `<div class="cell ${cell.kind}${alt}" role="gridcell" id="${cellId(r, c)}" aria-colindex="${c + 2}"${title}` +
       ` style="left:${columnAxis.start(c)}px;width:${widthPx}px">${escapeHtml(text)}</div>`
     )
   }
@@ -260,12 +295,106 @@ export function createGridView(host, options) {
     }
   }
 
+  function setColumnWidth(c, width) {
+    if (width === columnWidths[c]) return
+    columnWidths[c] = width
+    layoutColumns()
+    render()
+  }
+
+  /** Auto-fit samples the rows on screen, so a double-click reflects the values in view. */
+  function autoFitWidth(c) {
+    const first = Math.max(0, Math.floor(scrollY / ROW_HEIGHT))
+    const last = Math.min(rowCount - 1, first + AUTO_FIT_SAMPLE_ROWS)
+    const texts = []
+    for (let r = first; r <= last; r++) {
+      const cell = options.getCell(r, c)
+      if (cell) texts.push(renderedText(cell.text))
+    }
+    return fittedColumnWidth(options.measureText, columns[c], texts)
+  }
+
+  function autoFit(c) {
+    if (!Number.isInteger(c) || c < 0 || c >= columns.length) return
+    userSized.add(c)
+    setColumnWidth(c, autoFitWidth(c))
+  }
+
+  /** Fits the columns on screen once, after the first rows arrive. */
+  function fitVisibleColumns() {
+    if (!rendered || resizing) return
+    let changed = false
+    for (let c = rendered.c0; c <= rendered.c1; c++) {
+      if (userSized.has(c)) continue
+      const width = autoFitWidth(c)
+      if (width === columnWidths[c]) continue
+      columnWidths[c] = width
+      changed = true
+    }
+    if (changed) {
+      layoutColumns()
+      render()
+    }
+  }
+
+  function onResizeMove(event) {
+    if (!resizing) return
+    const width = clampColumnWidth(resizing.startWidth + event.clientX - resizing.startX)
+    if (width === columnWidths[resizing.c]) return
+    resizing.moved = true
+    setColumnWidth(resizing.c, width)
+  }
+
+  function clearResize() {
+    resizing?.head?.classList.remove('resizing')
+    headerStrip.querySelector('.col-head.resizing')?.classList.remove('resizing')
+    resizing = null
+    document.documentElement.classList.remove('col-resizing')
+    window.removeEventListener('pointermove', onResizeMove)
+    window.removeEventListener('pointerup', stopResize)
+    window.removeEventListener('pointercancel', stopResize)
+  }
+
+  function stopResize() {
+    if (!resizing) return
+    const moved = resizing.moved
+    clearResize()
+    // Why: a click that did not move must not re-render, or it would replace the handle between
+    // the two clicks of a double-click and the auto-fit would never see it.
+    if (moved) render()
+  }
+
+  function startResize(event, c, handle) {
+    if (!Number.isInteger(c) || c < 0 || c >= columnWidths.length) return
+    event.stopPropagation()
+    userSized.add(c)
+    const head = handle.closest?.('.col-head')
+    head?.classList.add('resizing')
+    resizing = { c, startX: event.clientX, startWidth: columnWidths[c], head, moved: false }
+    document.documentElement.classList.add('col-resizing')
+    window.addEventListener('pointermove', onResizeMove)
+    window.addEventListener('pointerup', stopResize)
+    window.addEventListener('pointercancel', stopResize)
+  }
+
   function onPointerDown(event) {
     if (event.button !== 0 || rowCount === 0 || columns.length === 0) return
+    const handle = event.target.closest?.('.col-resize')
+    if (handle) {
+      startResize(event, Number(handle.dataset.column), handle)
+      return
+    }
     const hit = hitTest(event.clientX, event.clientY)
     event.preventDefault()
     viewport.focus({ preventScroll: true })
     select(hit.r, hit.c, false)
+  }
+
+  function onDoubleClick(event) {
+    const handle = event.target.closest?.('.col-resize')
+    if (!handle) return
+    event.preventDefault()
+    autoFit(Number(handle.dataset.column))
   }
 
   let destroyed = false
@@ -285,6 +414,7 @@ export function createGridView(host, options) {
   scroller.addEventListener('scroll', onScroll, { passive: true })
   viewport.addEventListener('keydown', onKeyDown)
   viewport.addEventListener('pointerdown', onPointerDown)
+  headerStrip.addEventListener('dblclick', onDoubleClick)
 
   return {
     element: viewport,
@@ -295,12 +425,14 @@ export function createGridView(host, options) {
       rendered = null
       render()
     },
+    fitVisibleColumns,
     get active() {
       return active
     },
     state: () => ({ scrollTop: scroller.scrollTop, scrollLeft: scroller.scrollLeft }),
     destroy() {
       destroyed = true
+      clearResize()
       resizeObserver.disconnect()
       host.innerHTML = ''
     }

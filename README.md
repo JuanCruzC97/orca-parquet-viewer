@@ -12,9 +12,11 @@ After installing it from **Settings → Plugins**, open any `.parquet`, `.parq`,
 file from the file explorer. To see the raw bytes instead, switch the tab to **Source**.
 
 - **Data:** every visible row and column is drawn on demand, so files with millions of rows and
-  thousands of columns scroll smoothly. Column headers show each column's name and type
-  (`int64`, `string`, `timestamp[us]`, `decimal(18,3)`…). Arrow keys, Page Up/Down, Home/End and
-  Ctrl+arrows move through the grid; rows read from the file as they come into view.
+  thousands of columns scroll smoothly. Column headers stack each column's name above its type
+  (`int64`, `string`, `timestamp[us]`, `decimal(18,3)`…), and columns open fitted to their
+  headers and first rows. Drag a column's right edge to resize it, or double-click that edge to
+  fit it again to the values on screen. Arrow keys, Page Up/Down, Home/End and Ctrl+arrows move
+  through the grid; rows read from the file as they come into view.
 - **Metadata:** the file's facts — rows, row groups, size, writer and compression — its full
   schema tree with repetition and types, row-group sizes and codecs, and its key-value metadata
   (pandas metadata pretty-printed as JSON).

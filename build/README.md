@@ -63,6 +63,7 @@ dirty. Outside file changes re-decode; read-only tabs need nothing special.
 | `src/cell-display.js` | Value → grid text and kind, capped for the DOM |
 | `src/messages.js` | Every message the editor can show |
 | `src/axis.js` | Prefix sums + binary search for one grid axis |
+| `src/column-width.js` | Column bounds, opening width and double-click auto-fit math |
 | `src/vendored/` | The gzip and lz4 decompressors described above |
 | `scripts/fetch-corpus.mjs` | Downloads the apache/parquet-testing files the tests use |
 | `scripts/make-fixture.mjs` | Generates `known.parquet`, the exact-value fixture |
