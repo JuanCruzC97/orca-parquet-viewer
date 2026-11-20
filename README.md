@@ -17,8 +17,11 @@ file from the file explorer. To see the raw bytes instead, switch the tab to **S
   headers and first rows. Drag a column's right edge to resize it, or double-click that edge to
   fit it again to the values on screen. Click a column header to sort ascending, click again for
   descending, and a third time to restore the file's own row order; nulls stay last either way.
-  Arrow keys, Page Up/Down, Home/End and Ctrl+arrows move through the grid; rows read from the
-  file as they come into view.
+  Each column also has a filter input under its header: plain text is a case-insensitive
+  contains match (use `=100` for an exact number), while numbers and dates accept comparisons
+  (`>100`, `<=50`, `=2025-01-01`) and inclusive ranges (`10..20`, `2025-01-01..2025-12-31`).
+  Filters combine with each other and with the active sort. Arrow keys, Page Up/Down, Home/End
+  and Ctrl+arrows move through the grid; rows read from the file as they come into view.
 - **Metadata:** the file's facts — rows, row groups, size, writer and compression — its full
   schema tree with repetition and types, row-group sizes and codecs, and its key-value metadata
   (pandas metadata pretty-printed as JSON).
@@ -44,8 +47,10 @@ The viewer follows your Orca theme and reloads when the file changes on disk.
   zone, matching what the file actually says.
 - **Decimals** decode as scaled floating point, as hyparquet reads them; very large scales can
   lose precision in the display. INT64 and timestamps never do.
-- **Sorting reads the whole file once** and keeps the rows in memory; later sorts by any column
+- **Sorting and filtering read the whole file once** and keep the rows in memory; later changes
   reuse them. With the 64 MB file cap, that stays manageable.
+- **Filters run in memory.** Nulls only match a text filter such as `null`, not comparisons.
+  Dates compare in UTC, and a date-only bound such as `2025-12-31` covers the whole day.
 - **Files up to 64 MB.** That is the most Orca hands to a plugin editor.
 - **Encrypted files** (parquet modular encryption) are recognised and declined with a note.
 
@@ -57,6 +62,12 @@ The viewer follows your Orca theme and reloads when the file changes on disk.
 - `build/`: the source of `editor/`, the build recipe and the tests; see
   [build/README.md](build/README.md).
 - `images/`: the catalog cover and screenshots.
+
+## Future work
+
+- **Per-column filter popovers.** The filter row covers quick text and comparison filters. A
+  popover opened from each header would add type-aware operators, null controls and between
+  inputs without taking an extra row of vertical space.
 
 ## Changelog
 

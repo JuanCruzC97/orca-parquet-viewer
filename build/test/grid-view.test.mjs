@@ -6,6 +6,7 @@ Object.assign(globalThis, {
   window,
   document: window.document,
   Element: window.Element,
+  KeyboardEvent: window.KeyboardEvent,
   MouseEvent: window.MouseEvent,
   PointerEvent: window.PointerEvent
 })
@@ -31,7 +32,9 @@ function mount(values, options = {}) {
       return value === undefined ? null : { text: value, kind: 'date' }
     },
     onVisibleChange: () => {},
-    onSortColumn: options.onSortColumn
+    onSortColumn: options.onSortColumn,
+    onFilterChange: options.onFilterChange,
+    onClearFilters: options.onClearFilters
   })
   grid.setModel({
     rowCount: values.length,
@@ -94,6 +97,62 @@ describe('grid columns', () => {
     grid.setSort(null)
     expect(host.querySelector('.col-head').hasAttribute('aria-sort')).toBe(false)
     expect(host.querySelector('.col-sort')).toBeNull()
+    grid.destroy()
+  })
+})
+
+describe('grid filters', () => {
+  test('renders one input per column and reports typing', () => {
+    const changes = []
+    const { host, grid } = mount(['2026-01-15T10:30:00Z'], {
+      onFilterChange: (column, text) => changes.push([column, text])
+    })
+    const inputs = host.querySelectorAll('.filter-input')
+    expect(inputs).toHaveLength(2)
+    expect(inputs[0].getAttribute('aria-label')).toBe('Filter date')
+    inputs[1].value = 'USD'
+    inputs[1].dispatchEvent(new window.Event('input', { bubbles: true }))
+    expect(changes).toEqual([[1, 'USD']])
+    grid.destroy()
+  })
+
+  test('setFilters fills the visible inputs and clears them on demand', () => {
+    const cleared = []
+    const { host, grid } = mount(['2026-01-15T10:30:00Z'], { onClearFilters: () => cleared.push(true) })
+    grid.setFilters(['2026', 'USD'])
+    expect([...host.querySelectorAll('.filter-input')].map((input) => input.value)).toEqual(['2026', 'USD'])
+    expect(host.querySelector('.filter-clear').disabled).toBe(false)
+    host.querySelector('.filter-clear').click()
+    expect([...host.querySelectorAll('.filter-input')].map((input) => input.value)).toEqual(['', ''])
+    expect(host.querySelector('.filter-clear').disabled).toBe(true)
+    expect(cleared).toEqual([true])
+    grid.destroy()
+  })
+
+  test('Escape clears the focused filter', () => {
+    const changes = []
+    const { host, grid } = mount(['2026-01-15T10:30:00Z'], {
+      onFilterChange: (column, text) => changes.push([column, text])
+    })
+    const input = host.querySelectorAll('.filter-input')[1]
+    input.value = 'USD'
+    input.dispatchEvent(new window.Event('input', { bubbles: true }))
+    input.dispatchEvent(new window.KeyboardEvent('keydown', { bubbles: true, key: 'Escape' }))
+    expect(input.value).toBe('')
+    expect(changes).toEqual([[1, 'USD'], [1, '']])
+    grid.destroy()
+  })
+
+  test('keeps the header and filters visible when a view has no rows', () => {
+    const { host, grid } = mount(['2026-01-15T10:30:00Z'])
+    grid.setEmptyMessage('No rows match these filters.')
+    grid.setRowCount(0)
+    expect(host.querySelectorAll('.col-head')).toHaveLength(2)
+    expect(host.querySelectorAll('.filter-input')).toHaveLength(2)
+    expect(host.querySelector('.grid-empty').hidden).toBe(false)
+    expect(host.querySelector('.grid-empty').textContent).toBe('No rows match these filters.')
+    grid.setRowCount(1)
+    expect(host.querySelector('.grid-empty').hidden).toBe(true)
     grid.destroy()
   })
 })

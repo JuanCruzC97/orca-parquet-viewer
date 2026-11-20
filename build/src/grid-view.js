@@ -11,7 +11,9 @@ import { createAxis } from './axis.js'
 import { escapeHtml, renderedText } from './cell-display.js'
 import { clampColumnWidth, fittedColumnWidth, headerColumnWidth } from './column-width.js'
 
-const HEADER_HEIGHT = 40
+const COLUMN_HEADER_HEIGHT = 40
+const FILTER_ROW_HEIGHT = 28
+const HEADER_HEIGHT = COLUMN_HEADER_HEIGHT + FILTER_ROW_HEIGHT
 const ROW_HEIGHT = 24
 const OVERSCAN_ROWS = 10
 const OVERSCAN_COLUMNS = 3
@@ -20,12 +22,15 @@ const SORT_ARROW_WIDTH = 14
 const MAX_RENDERED_TEXT = 1000
 // Header text follows the values underneath: numbers and dates to the right, booleans centered.
 const RIGHT_ALIGNED_LABEL = /^(?:u?int\d*|float\d*|double|decimal\(|date$|time\[|timestamp\[)/
+const NUMERIC_LABEL = /^(?:u?int\d*|float\d*|double|decimal\()/
 
 /**
  * @param {HTMLElement} host
  * @param {{ measureText: (text: string) => number, getCell: (r: number, c: number) => { text: string, kind: string, title?: string } | null,
  *   onVisibleChange: (r0: number, r1: number, c0: number, c1: number) => void,
- *   onSortColumn?: (c: number) => void }} options
+ *   onSortColumn?: (c: number) => void,
+ *   onFilterChange?: (c: number, text: string) => void,
+ *   onClearFilters?: () => void }} options
  */
 export function createGridView(host, options) {
   host.innerHTML = `
@@ -36,8 +41,15 @@ export function createGridView(host, options) {
           <div class="corner" role="columnheader" aria-colindex="1" aria-label="Row numbers"></div>
           <div class="strip"></div>
         </div></div>
+        <div class="filter-row" role="group" aria-label="Column filters">
+          <div class="filter-corner">
+            <button class="filter-clear" type="button" title="Clear all filters" aria-label="Clear all filters" disabled>Clear</button>
+          </div>
+          <div class="filter-strip"></div>
+        </div>
         <div class="body" role="rowgroup">
           <div class="rows"><div class="row-list"></div><div class="selection" aria-hidden="true"><div class="active"></div></div></div>
+          <div class="grid-empty" role="status" hidden></div>
         </div>
       </div>
     </div>`
@@ -45,10 +57,14 @@ export function createGridView(host, options) {
   const spacer = host.querySelector('.spacer')
   const viewport = host.querySelector('.viewport')
   const headerStrip = host.querySelector('.col-header .strip')
+  const filterStrip = host.querySelector('.filter-strip')
+  const filterClear = host.querySelector('.filter-clear')
+  const emptyBox = host.querySelector('.grid-empty')
   const corner = host.querySelector('.corner')
   const rowList = host.querySelector('.row-list')
   const activeBox = host.querySelector('.selection .active')
   const idPrefix = `g${Math.random().toString(36).slice(2, 8)}`
+  host.style.setProperty('--grid-column-header-height', `${COLUMN_HEADER_HEIGHT}px`)
   host.style.setProperty('--grid-header-height', `${HEADER_HEIGHT}px`)
 
   let columns = []
@@ -57,6 +73,8 @@ export function createGridView(host, options) {
   let columnAxis = createAxis(new Float64Array(0))
   let resizing = null
   let sort = null
+  let filterValues = []
+  let emptyText = ''
   let rowCount = 0
   let gutter = 52
   let active = { r: 0, c: 0 }
@@ -73,6 +91,8 @@ export function createGridView(host, options) {
     columnWidths = columns.map((column) => headerColumnWidth(options.measureText, column))
     userSized = new Set()
     sort = null
+    filterValues = columns.map(() => '')
+    emptyText = ''
     gutter = Math.max(52, Math.ceil(options.measureText(String(Math.max(1, rowCount))) + 20))
     active = { r: 0, c: 0 }
     rendered = null
@@ -96,6 +116,7 @@ export function createGridView(host, options) {
 
   function setSort(next) {
     sort = next ?? null
+    let resized = false
     if (sort) {
       const column = columns[sort.column]
       if (column) {
@@ -104,10 +125,32 @@ export function createGridView(host, options) {
         if (columnWidths[sort.column] < width) {
           columnWidths[sort.column] = width
           layoutColumns()
+          resized = true
         }
       }
     }
-    render()
+    if (resized) render()
+    else renderSortCues()
+  }
+
+  /** Updates the arrow and aria-sort without replacing header nodes during a click sequence. */
+  function renderSortCues() {
+    for (const head of headerStrip.querySelectorAll('.col-head')) {
+      const c = Number(head.dataset.column)
+      const direction = sort?.column === c ? sort.direction : 0
+      head.classList.toggle('sorted', Boolean(direction))
+      if (direction) head.setAttribute('aria-sort', direction > 0 ? 'ascending' : 'descending')
+      else head.removeAttribute('aria-sort')
+      const line = head.querySelector('.col-name-line')
+      line?.querySelector('.col-sort')?.remove()
+      if (direction && line) {
+        const arrow = document.createElement('span')
+        arrow.className = 'col-sort'
+        arrow.setAttribute('aria-hidden', 'true')
+        arrow.textContent = direction > 0 ? '▲' : '▼'
+        line.append(arrow)
+      }
+    }
   }
 
   function measure() {
@@ -157,9 +200,7 @@ export function createGridView(host, options) {
     }
   }
 
-  function render() {
-    if (rowCount === 0 || columns.length === 0) return
-    const visible = visibleWindow()
+  function computeArea(visible) {
     const area = {
       r0: Math.max(0, visible.r0 - OVERSCAN_ROWS),
       r1: Math.min(rowCount - 1, visible.r1 + OVERSCAN_ROWS),
@@ -171,7 +212,23 @@ export function createGridView(host, options) {
       area.c0 = 0
       area.c1 = columns.length - 1
     }
+    return area
+  }
+
+  function render() {
+    if (columns.length === 0) return
+    const visible = visibleWindow()
+    const area = computeArea(visible)
     rendered = area
+    renderHeaderAndFilters(area)
+    renderRows(area, visible)
+  }
+
+  function renderHeaderAndFilters(area) {
+    const focused = filterStrip.contains(document.activeElement) ? document.activeElement : null
+    const focusColumn = focused ? Number(focused.dataset.column) : null
+    const focusStart = focused?.selectionStart ?? null
+    const focusEnd = focused?.selectionEnd ?? null
 
     let header = ''
     for (let c = area.c0; c <= area.c1; c++) {
@@ -198,6 +255,37 @@ export function createGridView(host, options) {
     }
     headerStrip.innerHTML = header
 
+    let filters = ''
+    for (let c = area.c0; c <= area.c1; c++) {
+      const column = columns[c]
+      const alt = c % 2 === 1 ? ' alt' : ''
+      filters +=
+        `<div class="filter-cell${alt}" style="left:${columnAxis.start(c)}px;width:${columnAxis.size(c)}px">` +
+        `<input class="filter-input" type="text" data-column="${c}" value="${escapeHtml(filterValues[c] ?? '')}"` +
+        ` aria-label="Filter ${escapeHtml(column.name)}" title="${escapeHtml(filterHint(column))}"` +
+        ` placeholder="Filter…" spellcheck="false" autocomplete="off"></div>`
+    }
+    filterStrip.innerHTML = filters
+    updateFilterClear()
+
+    if (focusColumn !== null) {
+      const next = filterStrip.querySelector(`.filter-input[data-column="${focusColumn}"]`)
+      if (next) {
+        next.focus({ preventScroll: true })
+        if (focusStart !== null) next.setSelectionRange(focusStart, focusEnd ?? focusStart)
+      }
+    }
+  }
+
+  function filterHint(column) {
+    if (column.kind === 'date' || column.kind === 'timestamp') {
+      return `Filter ${column.name}: text, >2025-01-01, or 2025-01-01..2025-12-31`
+    }
+    if (NUMERIC_LABEL.test(column.label)) return `Filter ${column.name}: text, >100, or 100..200`
+    return `Filter ${column.name}: contains`
+  }
+
+  function renderRows(area, visible) {
     let html = ''
     for (let r = area.r0; r <= area.r1; r++) {
       const current = r === active.r ? ' active' : ''
@@ -212,16 +300,37 @@ export function createGridView(host, options) {
     }
     rowList.innerHTML = html
     positionActive()
+    activeBox.style.display = rowCount ? '' : 'none'
     if (active.r >= area.r0 && active.r <= area.r1) {
       viewport.setAttribute('aria-activedescendant', cellId(active.r, active.c))
+    } else {
+      viewport.removeAttribute('aria-activedescendant')
     }
+    syncEmptyMessage()
+    reportVisible(area, visible)
+  }
+
+  function renderRowsOnly() {
+    if (columns.length === 0) return
+    const visible = visibleWindow()
+    const area = computeArea(visible)
+    rendered = area
+    renderRows(area, visible)
+  }
+
+  function reportVisible(area, visible) {
     const visibleArea = {
       r0: visible.r0,
-      r1: visible.r1,
+      r1: Math.max(visible.r0, Math.min(visible.r1, Math.max(0, rowCount - 1))),
       c0: Math.min(area.c0 + OVERSCAN_COLUMNS, columns.length - 1),
       c1: Math.max(area.c1 - OVERSCAN_COLUMNS, 0)
     }
     options.onVisibleChange(visibleArea.r0, visibleArea.r1, visibleArea.c0, visibleArea.c1)
+  }
+
+  function syncEmptyMessage() {
+    emptyBox.textContent = emptyText
+    emptyBox.hidden = !emptyText || rowCount > 0
   }
 
   function columnAlign(column) {
@@ -259,6 +368,67 @@ export function createGridView(host, options) {
     activeBox.style.height = `${ROW_HEIGHT}px`
   }
 
+  function updateFilterClear() {
+    filterClear.disabled = !filterValues.some((text) => String(text).trim() !== '')
+  }
+
+  function setFilters(next) {
+    filterValues = columns.map((_, index) => String(next?.[index] ?? ''))
+    for (const input of filterStrip.querySelectorAll('.filter-input')) {
+      const c = Number(input.dataset.column)
+      input.value = filterValues[c] ?? ''
+    }
+    updateFilterClear()
+  }
+
+  function setRowCount(next) {
+    rowCount = Number.isFinite(next) ? Math.max(0, Math.floor(next)) : 0
+    viewport.setAttribute('aria-rowcount', String(rowCount + 1))
+    spacer.style.height = `${HEADER_HEIGHT + rowCount * ROW_HEIGHT}px`
+    active = { r: clampRow(active.r), c: active.c }
+    if (scroller.scrollTop !== 0) scroller.scrollTop = 0
+    scrollY = 0
+    host.querySelector('.rows').style.transform = 'translate3d(0, 0, 0)'
+    renderRowsOnly()
+  }
+
+  function setEmptyMessage(text) {
+    emptyText = text ?? ''
+    syncEmptyMessage()
+  }
+
+  function onFilterInput(event) {
+    if (event.isComposing) return
+    const input = event.target.closest?.('.filter-input')
+    if (!input) return
+    const c = Number(input.dataset.column)
+    if (!Number.isInteger(c) || c < 0 || c >= filterValues.length) return
+    filterValues[c] = input.value
+    updateFilterClear()
+    options.onFilterChange?.(c, input.value)
+  }
+
+  function onFilterKeyDown(event) {
+    const input = event.target.closest?.('.filter-input')
+    if (!input || event.key !== 'Escape') return
+    event.preventDefault()
+    event.stopPropagation()
+    const c = Number(input.dataset.column)
+    if (!input.value && !filterValues[c]) return
+    input.value = ''
+    filterValues[c] = ''
+    updateFilterClear()
+    options.onFilterChange?.(c, '')
+  }
+
+  function clearAllFilters() {
+    if (filterClear.disabled) return
+    filterValues = columns.map(() => '')
+    for (const input of filterStrip.querySelectorAll('.filter-input')) input.value = ''
+    updateFilterClear()
+    options.onClearFilters?.()
+  }
+
   function scrollIntoView(r, c) {
     const x = columnAxis.start(c)
     const x1 = columnAxis.end(c)
@@ -284,7 +454,7 @@ export function createGridView(host, options) {
   }
 
   function onKeyDown(event) {
-    if (rowCount === 0 || columns.length === 0) return
+    if (event.target.closest?.('.filter-input') || rowCount === 0 || columns.length === 0) return
     const primary = event.ctrlKey || event.metaKey
     const arrows = { ArrowUp: [-1, 0], ArrowDown: [1, 0], ArrowLeft: [0, -1], ArrowRight: [0, 1] }
     if (event.key in arrows) {
@@ -410,6 +580,7 @@ export function createGridView(host, options) {
       startResize(event, Number(handle.dataset.column), handle)
       return
     }
+    if (event.target.closest?.('.filter-row')) return
     if (event.target.closest?.('.col-head')) {
       // Header clicks sort; they never change the selected cell.
       viewport.focus({ preventScroll: true })
@@ -453,6 +624,9 @@ export function createGridView(host, options) {
   viewport.addEventListener('pointerdown', onPointerDown)
   headerStrip.addEventListener('click', onHeaderClick)
   headerStrip.addEventListener('dblclick', onDoubleClick)
+  filterStrip.addEventListener('input', onFilterInput)
+  filterStrip.addEventListener('keydown', onFilterKeyDown)
+  filterClear.addEventListener('click', clearAllFilters)
 
   return {
     element: viewport,
@@ -464,6 +638,9 @@ export function createGridView(host, options) {
       render()
     },
     setSort,
+    setRowCount,
+    setFilters,
+    setEmptyMessage,
     fitVisibleColumns,
     get active() {
       return active

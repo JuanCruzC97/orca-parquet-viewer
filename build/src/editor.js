@@ -3,6 +3,7 @@
 // both axes, and rows are read in windows as the person scrolls, so a file with millions of
 // rows opens as fast as one with ten.
 import { displayValue } from './cell-display.js'
+import { compileFilter } from './filter-rows.js'
 import { createGridView } from './grid-view.js'
 import { MESSAGES } from './messages.js'
 import { renderMetadata } from './metadata-view.js'
@@ -16,9 +17,10 @@ const WIDE_COLUMN_THRESHOLD = 40
 const BASE_WINDOW_ROWS = 2_000
 const MAX_WINDOW_ROWS = 30_000
 const MAX_CACHED_WINDOWS = 8
-// Sorting needs every row once. Row-group-aligned chunks bound the transient memory without
-// decoding a row group twice.
-const SORT_READ_ROWS = 100_000
+// Sorting and filtering need every row once. Row-group-aligned chunks bound the transient memory
+// without decoding a row group twice.
+const FULL_READ_ROWS = 100_000
+const FILTER_DELAY = 120
 
 const $ = (id) => document.getElementById(id)
 const ui = {
@@ -48,12 +50,15 @@ let metadataRendered = false
 let initialFitDone = false
 let windowRows = BASE_WINDOW_ROWS
 let sort = null
-let sortedRows = null
+let pendingSort = null
+let filters = []
+let viewRows = null
 let fullRows = null
-let sortFailures = []
-let sortError = ''
-let sorting = false
-let sortToken = 0
+let viewFailures = []
+let viewError = ''
+let viewBusy = false
+let viewToken = 0
+let filterTimer = 0
 /** Window index → entry: `{ rowStart, rowEnd, colRange, promise, rows, failedColumns, error }`. */
 const windows = new Map()
 
@@ -61,7 +66,9 @@ const grid = createGridView(ui.gridHost, {
   measureText,
   getCell: cellAt,
   onVisibleChange: onViewport,
-  onSortColumn: sortByColumn
+  onSortColumn: sortByColumn,
+  onFilterChange,
+  onClearFilters: clearFilters
 })
 grid.element.id = 'grid'
 
@@ -77,10 +84,10 @@ function cellAt(r, c) {
   if (!file) return null
   const column = file.columns[c]
   if (!column) return null
-  if (sortedRows) {
-    const failed = sortFailures.find((reason) => reason.name === column.name)
+  if (viewRows) {
+    const failed = viewFailures.find((reason) => reason.name === column.name)
     if (failed) return { text: '✕', kind: 'failed', title: failed.reason }
-    const row = sortedRows[r]
+    const row = viewRows[r]
     return row ? displayValue(row[column.name], column) : null
   }
   const entry = windows.get(Math.floor(r / windowRows))
@@ -96,7 +103,7 @@ function cellAt(r, c) {
 function onViewport(r0, r1, c0, c1) {
   if (!file) return
   if (view !== 'data') return
-  if (sortedRows) return
+  if (viewRows) return
   const narrow = file.columns.length <= WIDE_COLUMN_THRESHOLD
   const colRange = narrow ? 'all' : { c0: Math.max(0, c0 - 3), c1: Math.min(file.columns.length - 1, c1 + 3) }
   const lastWindow = Math.max(0, Math.floor(Math.max(0, file.rowCount - 1) / windowRows))
@@ -166,11 +173,11 @@ function evict(wanted, current) {
 
 function updateNote() {
   let reading = false
-  let reason = sortError
-  if (sorting) {
+  let reason = viewError
+  if (viewBusy) {
     reading = true
-  } else if (sortedRows) {
-    reason ||= sortFailures[0]?.reason ?? ''
+  } else if (viewRows) {
+    reason ||= viewFailures[0]?.reason ?? ''
   } else {
     for (const entry of windows.values()) {
       if (!entry.rows) reading = true
@@ -178,105 +185,176 @@ function updateNote() {
       else if (entry.failedColumns.length) reason ||= entry.failedColumns[0].reason
     }
   }
-  const text = reading ? (sorting ? MESSAGES.sorting : MESSAGES.loadingRows) : reason
+  const text = reading ? (hasFilters() ? MESSAGES.filtering : MESSAGES.sorting) : reason
   if (ui.note.textContent !== text) {
     ui.note.textContent = text
     if (reason && !reading) announce(reason)
   }
 }
 
-// --- Sorting ------------------------------------------------------------------------------------
+// --- Filtering and sorting -----------------------------------------------------------------------
 
 const yieldToUi = () => new Promise((resolve) => setTimeout(resolve, 0))
 
+function hasFilters() {
+  return filters.some((text) => String(text ?? '').trim() !== '')
+}
+
+function activeFilters() {
+  const active = []
+  for (let c = 0; c < filters.length; c++) {
+    const text = String(filters[c] ?? '').trim()
+    if (!text) continue
+    const column = file.columns[c]
+    const test = compileFilter(text, column)
+    if (test) active.push({ name: column.name, test })
+  }
+  return active
+}
+
+function applyFilters(rows, active) {
+  if (active.length === 0) return rows.slice()
+  return rows.filter((row) => active.every(({ name, test }) => test(row[name])))
+}
+
+function onFilterChange(c, text) {
+  if (!file || c < 0 || c >= filters.length) return
+  filters[c] = text
+  clearTimeout(filterTimer)
+  filterTimer = setTimeout(() => rebuildView(), FILTER_DELAY)
+}
+
+function clearFilters() {
+  if (!file) return
+  clearTimeout(filterTimer)
+  filters = new Array(file.columns.length).fill('')
+  grid.setFilters(filters)
+  rebuildView().then((ok) => {
+    if (ok) announce(MESSAGES.filtersCleared)
+  })
+}
+
 /** Header click: ascending, then descending, then back to the file's own row order. */
-function sortByColumn(c) {
-  if (!file || sorting) return
-  const next = nextSort(sort, c)
-  if (!next) {
-    clearSort()
-    return
-  }
-  const token = ++sortToken
-  sorting = true
-  sortError = ''
-  updateNote()
-  announce(MESSAGES.sorting)
-  applySort(next, token)
+async function sortByColumn(c) {
+  if (!file) return
+  clearTimeout(filterTimer)
+  const next = nextSort(pendingSort ?? sort, c)
+  pendingSort = next
+  const ok = await rebuildView(next)
+  if (!ok) return
+  if (next) announce(MESSAGES.sortedBy(file.columns[c].name, next.direction))
+  else announce(MESSAGES.sortCleared)
 }
 
-function clearSort() {
-  sortToken++
-  sorting = false
-  sort = null
-  sortedRows = null
-  fullRows = null
-  sortFailures = []
-  sortError = ''
-  windows.clear()
-  grid.setSort(null)
-  grid.refresh()
-  grid.select(0, grid.active.c)
-  updateNote()
-  announce(MESSAGES.sortCleared)
+function sameSort(a, b) {
+  return (a?.column ?? -1) === (b?.column ?? -1) && (a?.direction ?? 0) === (b?.direction ?? 0)
 }
 
-async function applySort(next, token) {
-  const column = file.columns[next.column]
-  if (!column) {
-    sorting = false
+/**
+ * Rebuilds the rows behind the grid from the current filters and sort. With neither active the
+ * grid goes back to reading windows in file order.
+ */
+async function rebuildView(nextSort = pendingSort ?? sort) {
+  if (!file) return false
+  const token = ++viewToken
+  viewError = ''
+  const filtered = hasFilters()
+  if (!filtered && !nextSort) {
+    const sortChanged = sort !== null
+    if (pendingSort === nextSort) pendingSort = null
+    viewBusy = false
+    sort = null
+    viewRows = null
+    fullRows = null
+    viewFailures = []
+    windows.clear()
+    grid.setEmptyMessage('')
+    grid.setRowCount(file.rowCount)
+    if (sortChanged) grid.setSort(null)
+    renderDims()
     updateNote()
-    return
+    return true
   }
+  viewBusy = true
+  updateNote()
   try {
     if (!fullRows) {
       const rows = await readAllRows(token)
-      if (!rows || token !== sortToken) return
+      if (!rows || token !== viewToken) return false
       fullRows = rows
     }
-    const failed = sortFailures.find((reason) => reason.name === column.name)
-    if (failed) {
-      sorting = false
-      sortError = MESSAGES.sortColumnFailed(failed.reason)
+    const active = activeFilters()
+    const failedFilter = active.find(({ name }) => viewFailures.some((failure) => failure.name === name))
+    if (failedFilter) {
+      const failure = viewFailures.find((entry) => entry.name === failedFilter.name)
+      viewBusy = false
+      if (pendingSort === nextSort) pendingSort = null
+      viewError = MESSAGES.filterColumnFailed(failedFilter.name, failure.reason)
       updateNote()
-      return
+      return false
     }
-    // Why: let "Sorting…" paint before the synchronous sort.
+    if (nextSort) {
+      const sortColumn = file.columns[nextSort.column]
+      const failedSort = sortColumn && viewFailures.find((failure) => failure.name === sortColumn.name)
+      if (failedSort) {
+        viewBusy = false
+        if (pendingSort === nextSort) pendingSort = null
+        viewError = MESSAGES.sortColumnFailed(failedSort.reason)
+        updateNote()
+        return false
+      }
+    }
+    // Why: let "Filtering…"/"Sorting…" paint before the synchronous pass.
     await yieldToUi()
-    if (token !== sortToken) return
-    sortRows(fullRows, column.name, next.direction)
-    sortedRows = fullRows
-    sort = next
-    sorting = false
-    sortError = ''
+    if (token !== viewToken) return false
+    let rows = filtered ? applyFilters(fullRows, active) : fullRows.slice()
+    if (nextSort) {
+      const sortColumn = file.columns[nextSort.column]
+      if (!sortColumn) {
+        viewBusy = false
+        if (pendingSort === nextSort) pendingSort = null
+        updateNote()
+        return false
+      }
+      sortRows(rows, sortColumn.name, nextSort.direction)
+    }
+    const sortChanged = !sameSort(sort, nextSort)
+    if (pendingSort === nextSort) pendingSort = null
+    viewRows = rows
+    sort = nextSort ?? null
+    viewBusy = false
     windows.clear()
-    grid.setSort(next)
-    grid.select(0, next.column)
-    // Why: a sort can win the race against the first window read, which is what normally fits
-    // the opening columns.
+    grid.setEmptyMessage(rows.length === 0 && filtered ? MESSAGES.noMatches : '')
+    grid.setRowCount(rows.length)
+    if (sortChanged) grid.setSort(sort)
+    // Why: a view change can win the race against the first window read, which is what normally
+    // fits the opening columns.
     if (!initialFitDone) {
       initialFitDone = true
       grid.fitVisibleColumns()
     }
+    renderDims()
     updateNote()
-    announce(MESSAGES.sortedBy(column.name, next.direction))
+    return true
   } catch (error) {
-    if (token !== sortToken) return
-    sorting = false
-    sortError = describeReadError(error)
+    if (token !== viewToken) return false
+    viewBusy = false
+    if (pendingSort === nextSort) pendingSort = null
+    viewError = describeReadError(error)
     updateNote()
+    return false
   }
 }
 
-/** Reads every row once, in row-group-aligned chunks, for in-memory sorting. */
+/** Reads every row once, in row-group-aligned chunks, for an in-memory view. */
 async function readAllRows(token) {
   const names = file.columns.map((column) => column.name)
   const rows = []
   const failures = []
-  for (const range of readRanges(file.rowGroups, SORT_READ_ROWS)) {
-    if (token !== sortToken) return null
+  for (const range of readRanges(file.rowGroups, FULL_READ_ROWS)) {
+    if (token !== viewToken) return null
     const result = await readWindow(file.bytes, file.metadata, names, range.start, range.end)
-    if (token !== sortToken) return null
+    if (token !== viewToken) return null
     for (const row of result.rows) rows.push(row)
     for (const failure of result.failedColumns) {
       if (!failures.some((entry) => entry.name === failure.name)) failures.push(failure)
@@ -284,7 +362,7 @@ async function readAllRows(token) {
     updateNote()
     await yieldToUi()
   }
-  sortFailures = failures
+  viewFailures = failures
   return rows
 }
 
@@ -352,8 +430,12 @@ function renderNotice() {
 
 function renderDims() {
   const groups = file.rowGroups.length
+  const shown = viewRows ? viewRows.length : file.rowCount
+  const rowsText = hasFilters()
+    ? `${countFormat.format(shown)} of ${countFormat.format(file.rowCount)} rows`
+    : `${countFormat.format(file.rowCount)} ${file.rowCount === 1 ? 'row' : 'rows'}`
   ui.dims.textContent =
-    `${countFormat.format(file.rowCount)} ${file.rowCount === 1 ? 'row' : 'rows'} × ` +
+    `${rowsText} × ` +
     `${countFormat.format(file.columns.length)} ${file.columns.length === 1 ? 'column' : 'columns'} · ` +
     `${countFormat.format(groups)} row ${groups === 1 ? 'group' : 'groups'}`
 }
@@ -361,17 +443,20 @@ function renderDims() {
 /** Opens the file Orca handed us, replacing whatever was open before. */
 function receive(bytes) {
   const token = ++loadToken
-  sortToken++
+  viewToken++
+  clearTimeout(filterTimer)
   file = null
   windows.clear()
   metadataRendered = false
   initialFitDone = false
-  sorting = false
+  viewBusy = false
   sort = null
-  sortedRows = null
+  pendingSort = null
+  filters = []
+  viewRows = null
   fullRows = null
-  sortFailures = []
-  sortError = ''
+  viewFailures = []
+  viewError = ''
   showMessage(MESSAGES.opening)
   // Why: let "Opening" paint before the footer parse, which holds the main thread briefly.
   setTimeout(async () => {
@@ -383,6 +468,7 @@ function receive(bytes) {
       return
     }
     file = result.file
+    filters = new Array(file.columns.length).fill('')
     // Window size follows the file: big row groups amortize their re-reads with big windows.
     const maxGroupRows = file.rowGroups.reduce((max, group) => Math.max(max, group.rowCount), 0)
     windowRows = Math.min(MAX_WINDOW_ROWS, Math.max(BASE_WINDOW_ROWS, Math.ceil(maxGroupRows / 4)))

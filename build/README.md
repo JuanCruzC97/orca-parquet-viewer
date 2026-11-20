@@ -64,6 +64,7 @@ dirty. Outside file changes re-decode; read-only tabs need nothing special.
 | `src/messages.js` | Every message the editor can show |
 | `src/axis.js` | Prefix sums + binary search for one grid axis |
 | `src/column-width.js` | Column bounds, opening width and double-click auto-fit math |
+| `src/filter-rows.js` | Per-column filter expressions and value matching |
 | `src/sort-rows.js` | Header sort cycle and in-memory value ordering |
 | `src/vendored/` | The gzip and lz4 decompressors described above |
 | `scripts/fetch-corpus.mjs` | Downloads the apache/parquet-testing files the tests use |

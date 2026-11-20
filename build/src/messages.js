@@ -16,9 +16,14 @@ export const MESSAGES = {
   readFailed: 'The file could not be read.',
   loadingRows: 'Reading rows…',
   sorting: 'Sorting rows…',
+  filtering: 'Filtering rows…',
   sortedBy: (name, direction) => `Sorted by ${name}, ${direction > 0 ? 'ascending' : 'descending'}.`,
   sortColumnFailed: (reason) => `This column cannot be read, so the rows cannot be sorted by it. ${reason}`,
   sortCleared: 'File order restored.',
+  filterColumnFailed: (name, reason) =>
+    `The ${name} column cannot be read, so the rows cannot be filtered by it. ${reason}`,
+  filtersCleared: 'Filters cleared.',
+  noMatches: 'No rows match these filters.',
   unsupportedEncoding: (encoding) =>
     `The file uses the ${encoding} data page encoding, which the viewer cannot read yet.`,
   unsupportedCodec: (codec, where) =>
