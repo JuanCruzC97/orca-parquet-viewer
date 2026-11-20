@@ -16,6 +16,7 @@ const ROW_HEIGHT = 24
 const OVERSCAN_ROWS = 10
 const OVERSCAN_COLUMNS = 3
 const AUTO_FIT_SAMPLE_ROWS = 2_000
+const SORT_ARROW_WIDTH = 14
 const MAX_RENDERED_TEXT = 1000
 // Header text follows the values underneath: numbers and dates to the right, booleans centered.
 const RIGHT_ALIGNED_LABEL = /^(?:u?int\d*|float\d*|double|decimal\(|date$|time\[|timestamp\[)/
@@ -23,7 +24,8 @@ const RIGHT_ALIGNED_LABEL = /^(?:u?int\d*|float\d*|double|decimal\(|date$|time\[
 /**
  * @param {HTMLElement} host
  * @param {{ measureText: (text: string) => number, getCell: (r: number, c: number) => { text: string, kind: string, title?: string } | null,
- *   onVisibleChange: (r0: number, r1: number, c0: number, c1: number) => void }} options
+ *   onVisibleChange: (r0: number, r1: number, c0: number, c1: number) => void,
+ *   onSortColumn?: (c: number) => void }} options
  */
 export function createGridView(host, options) {
   host.innerHTML = `
@@ -54,6 +56,7 @@ export function createGridView(host, options) {
   let userSized = new Set()
   let columnAxis = createAxis(new Float64Array(0))
   let resizing = null
+  let sort = null
   let rowCount = 0
   let gutter = 52
   let active = { r: 0, c: 0 }
@@ -69,6 +72,7 @@ export function createGridView(host, options) {
     clearResize()
     columnWidths = columns.map((column) => headerColumnWidth(options.measureText, column))
     userSized = new Set()
+    sort = null
     gutter = Math.max(52, Math.ceil(options.measureText(String(Math.max(1, rowCount))) + 20))
     active = { r: 0, c: 0 }
     rendered = null
@@ -88,6 +92,22 @@ export function createGridView(host, options) {
   function layoutColumns() {
     columnAxis = createAxis(Float64Array.from(columnWidths))
     spacer.style.width = `${gutter + columnAxis.total}px`
+  }
+
+  function setSort(next) {
+    sort = next ?? null
+    if (sort) {
+      const column = columns[sort.column]
+      if (column) {
+        // Why: the arrow shares the name line; widen only when the header would truncate.
+        const width = clampColumnWidth(headerColumnWidth(options.measureText, column) + SORT_ARROW_WIDTH)
+        if (columnWidths[sort.column] < width) {
+          columnWidths[sort.column] = width
+          layoutColumns()
+        }
+      }
+    }
+    render()
   }
 
   function measure() {
@@ -160,12 +180,17 @@ export function createGridView(host, options) {
       const current = c === active.c ? ' active' : ''
       const dragging = resizing?.c === c ? ' resizing' : ''
       const align = columnAlign(column)
+      const direction = sort?.column === c ? sort.direction : 0
+      const sorted = direction ? ' sorted' : ''
+      const ariaSort = direction ? ` aria-sort="${direction > 0 ? 'ascending' : 'descending'}"` : ''
+      const arrow = direction ? `<span class="col-sort" aria-hidden="true">${direction > 0 ? '▲' : '▼'}</span>` : ''
       header +=
-        `<div class="col-head${alt}${current}${dragging}${align}" role="columnheader" aria-colindex="${c + 2}"` +
+        `<div class="col-head${alt}${current}${dragging}${align}${sorted}" role="columnheader"` +
+        ` aria-colindex="${c + 2}"${ariaSort} data-column="${c}"` +
         ` style="left:${columnAxis.start(c)}px;width:${columnAxis.size(c)}px"` +
-        ` title="${escapeHtml(column.name)} · ${escapeHtml(column.label)}">` +
+        ` title="${escapeHtml(column.name)} · ${escapeHtml(column.label)} · click to sort">` +
         `<div class="col-head-text">` +
-        `<span class="col-name">${escapeHtml(column.name)}</span>` +
+        `<div class="col-name-line"><span class="col-name">${escapeHtml(column.name)}</span>${arrow}</div>` +
         `<span class="col-type">${escapeHtml(column.label)}</span></div>` +
         `<span class="col-resize" role="separator" aria-orientation="vertical"` +
         ` aria-label="Resize ${escapeHtml(column.name)} column" title="Drag to resize · double-click to fit"` +
@@ -311,7 +336,8 @@ export function createGridView(host, options) {
       const cell = options.getCell(r, c)
       if (cell) texts.push(renderedText(cell.text))
     }
-    return fittedColumnWidth(options.measureText, columns[c], texts)
+    const extra = sort?.column === c ? SORT_ARROW_WIDTH : 0
+    return clampColumnWidth(fittedColumnWidth(options.measureText, columns[c], texts) + extra)
   }
 
   function autoFit(c) {
@@ -384,10 +410,21 @@ export function createGridView(host, options) {
       startResize(event, Number(handle.dataset.column), handle)
       return
     }
+    if (event.target.closest?.('.col-head')) {
+      // Header clicks sort; they never change the selected cell.
+      viewport.focus({ preventScroll: true })
+      return
+    }
     const hit = hitTest(event.clientX, event.clientY)
     event.preventDefault()
     viewport.focus({ preventScroll: true })
     select(hit.r, hit.c, false)
+  }
+
+  function onHeaderClick(event) {
+    if (event.target.closest?.('.col-resize')) return
+    const head = event.target.closest?.('.col-head')
+    if (head) options.onSortColumn?.(Number(head.dataset.column))
   }
 
   function onDoubleClick(event) {
@@ -414,6 +451,7 @@ export function createGridView(host, options) {
   scroller.addEventListener('scroll', onScroll, { passive: true })
   viewport.addEventListener('keydown', onKeyDown)
   viewport.addEventListener('pointerdown', onPointerDown)
+  headerStrip.addEventListener('click', onHeaderClick)
   headerStrip.addEventListener('dblclick', onDoubleClick)
 
   return {
@@ -425,6 +463,7 @@ export function createGridView(host, options) {
       rendered = null
       render()
     },
+    setSort,
     fitVisibleColumns,
     get active() {
       return active

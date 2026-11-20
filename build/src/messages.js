@@ -15,6 +15,10 @@ export const MESSAGES = {
   noRows: 'The file has a schema but no rows.',
   readFailed: 'The file could not be read.',
   loadingRows: 'Reading rows…',
+  sorting: 'Sorting rows…',
+  sortedBy: (name, direction) => `Sorted by ${name}, ${direction > 0 ? 'ascending' : 'descending'}.`,
+  sortColumnFailed: (reason) => `This column cannot be read, so the rows cannot be sorted by it. ${reason}`,
+  sortCleared: 'File order restored.',
   unsupportedEncoding: (encoding) =>
     `The file uses the ${encoding} data page encoding, which the viewer cannot read yet.`,
   unsupportedCodec: (codec, where) =>

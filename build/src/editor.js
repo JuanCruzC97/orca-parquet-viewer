@@ -7,6 +7,7 @@ import { createGridView } from './grid-view.js'
 import { MESSAGES } from './messages.js'
 import { renderMetadata } from './metadata-view.js'
 import { describeReadError, openParquet, readWindow } from './parquet-reader.js'
+import { nextSort, sortRows } from './sort-rows.js'
 
 const GRID_FONT = '12px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif'
 // Beyond this many columns a window reads only the columns on screen: a 2,000-column file
@@ -15,6 +16,9 @@ const WIDE_COLUMN_THRESHOLD = 40
 const BASE_WINDOW_ROWS = 2_000
 const MAX_WINDOW_ROWS = 30_000
 const MAX_CACHED_WINDOWS = 8
+// Sorting needs every row once. Row-group-aligned chunks bound the transient memory without
+// decoding a row group twice.
+const SORT_READ_ROWS = 100_000
 
 const $ = (id) => document.getElementById(id)
 const ui = {
@@ -43,13 +47,21 @@ let view = 'data'
 let metadataRendered = false
 let initialFitDone = false
 let windowRows = BASE_WINDOW_ROWS
+let sort = null
+let sortedRows = null
+let fullRows = null
+let sortFailures = []
+let sortError = ''
+let sorting = false
+let sortToken = 0
 /** Window index → entry: `{ rowStart, rowEnd, colRange, promise, rows, failedColumns, error }`. */
 const windows = new Map()
 
 const grid = createGridView(ui.gridHost, {
   measureText,
   getCell: cellAt,
-  onVisibleChange: onViewport
+  onVisibleChange: onViewport,
+  onSortColumn: sortByColumn
 })
 grid.element.id = 'grid'
 
@@ -65,6 +77,12 @@ function cellAt(r, c) {
   if (!file) return null
   const column = file.columns[c]
   if (!column) return null
+  if (sortedRows) {
+    const failed = sortFailures.find((reason) => reason.name === column.name)
+    if (failed) return { text: '✕', kind: 'failed', title: failed.reason }
+    const row = sortedRows[r]
+    return row ? displayValue(row[column.name], column) : null
+  }
   const entry = windows.get(Math.floor(r / windowRows))
   if (!entry || !entry.rows) return null
   if (entry.colRange !== 'all' && (c < entry.colRange.c0 || c > entry.colRange.c1)) return null
@@ -78,6 +96,7 @@ function cellAt(r, c) {
 function onViewport(r0, r1, c0, c1) {
   if (!file) return
   if (view !== 'data') return
+  if (sortedRows) return
   const narrow = file.columns.length <= WIDE_COLUMN_THRESHOLD
   const colRange = narrow ? 'all' : { c0: Math.max(0, c0 - 3), c1: Math.min(file.columns.length - 1, c1 + 3) }
   const lastWindow = Math.max(0, Math.floor(Math.max(0, file.rowCount - 1) / windowRows))
@@ -147,17 +166,139 @@ function evict(wanted, current) {
 
 function updateNote() {
   let reading = false
-  let reason = ''
-  for (const entry of windows.values()) {
-    if (!entry.rows) reading = true
-    else if (entry.error) reason ||= entry.error
-    else if (entry.failedColumns.length) reason ||= entry.failedColumns[0].reason
+  let reason = sortError
+  if (sorting) {
+    reading = true
+  } else if (sortedRows) {
+    reason ||= sortFailures[0]?.reason ?? ''
+  } else {
+    for (const entry of windows.values()) {
+      if (!entry.rows) reading = true
+      else if (entry.error) reason ||= entry.error
+      else if (entry.failedColumns.length) reason ||= entry.failedColumns[0].reason
+    }
   }
-  const text = reading ? MESSAGES.loadingRows : reason
+  const text = reading ? (sorting ? MESSAGES.sorting : MESSAGES.loadingRows) : reason
   if (ui.note.textContent !== text) {
     ui.note.textContent = text
     if (reason && !reading) announce(reason)
   }
+}
+
+// --- Sorting ------------------------------------------------------------------------------------
+
+const yieldToUi = () => new Promise((resolve) => setTimeout(resolve, 0))
+
+/** Header click: ascending, then descending, then back to the file's own row order. */
+function sortByColumn(c) {
+  if (!file || sorting) return
+  const next = nextSort(sort, c)
+  if (!next) {
+    clearSort()
+    return
+  }
+  const token = ++sortToken
+  sorting = true
+  sortError = ''
+  updateNote()
+  announce(MESSAGES.sorting)
+  applySort(next, token)
+}
+
+function clearSort() {
+  sortToken++
+  sorting = false
+  sort = null
+  sortedRows = null
+  fullRows = null
+  sortFailures = []
+  sortError = ''
+  windows.clear()
+  grid.setSort(null)
+  grid.refresh()
+  grid.select(0, grid.active.c)
+  updateNote()
+  announce(MESSAGES.sortCleared)
+}
+
+async function applySort(next, token) {
+  const column = file.columns[next.column]
+  if (!column) {
+    sorting = false
+    updateNote()
+    return
+  }
+  try {
+    if (!fullRows) {
+      const rows = await readAllRows(token)
+      if (!rows || token !== sortToken) return
+      fullRows = rows
+    }
+    const failed = sortFailures.find((reason) => reason.name === column.name)
+    if (failed) {
+      sorting = false
+      sortError = MESSAGES.sortColumnFailed(failed.reason)
+      updateNote()
+      return
+    }
+    // Why: let "Sorting…" paint before the synchronous sort.
+    await yieldToUi()
+    if (token !== sortToken) return
+    sortRows(fullRows, column.name, next.direction)
+    sortedRows = fullRows
+    sort = next
+    sorting = false
+    sortError = ''
+    windows.clear()
+    grid.setSort(next)
+    grid.select(0, next.column)
+    // Why: a sort can win the race against the first window read, which is what normally fits
+    // the opening columns.
+    if (!initialFitDone) {
+      initialFitDone = true
+      grid.fitVisibleColumns()
+    }
+    updateNote()
+    announce(MESSAGES.sortedBy(column.name, next.direction))
+  } catch (error) {
+    if (token !== sortToken) return
+    sorting = false
+    sortError = describeReadError(error)
+    updateNote()
+  }
+}
+
+/** Reads every row once, in row-group-aligned chunks, for in-memory sorting. */
+async function readAllRows(token) {
+  const names = file.columns.map((column) => column.name)
+  const rows = []
+  const failures = []
+  for (const range of readRanges(file.rowGroups, SORT_READ_ROWS)) {
+    if (token !== sortToken) return null
+    const result = await readWindow(file.bytes, file.metadata, names, range.start, range.end)
+    if (token !== sortToken) return null
+    for (const row of result.rows) rows.push(row)
+    for (const failure of result.failedColumns) {
+      if (!failures.some((entry) => entry.name === failure.name)) failures.push(failure)
+    }
+    updateNote()
+    await yieldToUi()
+  }
+  sortFailures = failures
+  return rows
+}
+
+/** Contiguous read ranges aligned to row groups; small groups merge up to maxRows. */
+function readRanges(rowGroups, maxRows) {
+  const ranges = []
+  for (const group of rowGroups) {
+    if (group.rowCount === 0) continue
+    const end = group.firstRow + group.rowCount
+    const last = ranges[ranges.length - 1]
+    if (last && end - last.start <= maxRows) last.end = end
+    else ranges.push({ start: group.firstRow, end })
+  }
+  return ranges
 }
 
 // --- Views --------------------------------------------------------------------------------------
@@ -220,10 +361,17 @@ function renderDims() {
 /** Opens the file Orca handed us, replacing whatever was open before. */
 function receive(bytes) {
   const token = ++loadToken
+  sortToken++
   file = null
   windows.clear()
   metadataRendered = false
   initialFitDone = false
+  sorting = false
+  sort = null
+  sortedRows = null
+  fullRows = null
+  sortFailures = []
+  sortError = ''
   showMessage(MESSAGES.opening)
   // Why: let "Opening" paint before the footer parse, which holds the main thread briefly.
   setTimeout(async () => {
